@@ -1,0 +1,241 @@
+rules_version = '2';
+
+// ICF REFLEX — Firestore Security Rules
+// Default is deny. Roles live in /userRoles/{uid}, which only a Super Admin may write (and never for themselves).
+// NOTE: staff checks are written first in every `||` so that reads of non-existent documents by staff do not error.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function role() {
+      return signedIn() && exists(/databases/$(database)/documents/userRoles/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/userRoles/$(request.auth.uid)).data.role
+        : 'user';
+    }
+    function isSuperAdmin()   { return role() == 'super_admin'; }
+    function isAdmin()        { return role() in ['admin', 'super_admin']; }
+    function isContentStaff() { return role() in ['content_manager', 'admin', 'super_admin']; }
+    function isModerator()    { return role() in ['moderator', 'admin', 'super_admin']; }
+    function isAnyStaff()     { return role() in ['moderator', 'content_manager', 'admin', 'super_admin']; }
+
+    function str(v, max)    { return v is string && v.size() <= max; }
+    function reqStr(v, max) { return v is string && v.size() >= 1 && v.size() <= max; }
+    function urlOk(v)       { return v is string && v.size() <= 2048 && (v == '' || v.matches('^https://[^ ]+$')); }
+    function exact(d, keys) { return d.keys().hasAll(keys) && d.keys().hasOnly(keys); }
+
+    // ---------- users ----------
+    function userKeys() { return ['uid','displayName','email','photoURL','preferredLanguage','theme','createdAt','updatedAt','accountStatus']; }
+    function userFieldsOk(d) {
+      return str(d.displayName, 60) && urlOk(d.photoURL)
+        && d.theme in ['dark','light']
+        && d.preferredLanguage in ['en','ja','bn','es','fr','pt','ar'];
+    }
+    match /users/{uid} {
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(uid)
+        && exact(request.resource.data, userKeys())
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.accountStatus == 'active'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && userFieldsOk(request.resource.data);
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName','photoURL','preferredLanguage','theme','updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && userFieldsOk(request.resource.data);
+      allow delete: if false;
+    }
+
+    // ---------- roles (privilege boundary) ----------
+    match /userRoles/{uid} {
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update: if isSuperAdmin() && request.auth.uid != uid
+        && exact(request.resource.data, ['uid','role','assignedAt','assignedBy'])
+        && request.resource.data.uid == uid
+        && request.resource.data.assignedBy == request.auth.uid
+        && request.resource.data.role in ['premium','moderator','content_manager','admin','super_admin'];
+      allow delete: if isSuperAdmin() && request.auth.uid != uid;
+    }
+
+    // ---------- catalog ----------
+    function animeKeys() { return ['title','alternativeTitles','slug','description','posterUrl','coverUrl','bannerUrl','genres','releaseYear','status','animeType','rating','featured','visibility','createdAt','updatedAt','titleLower','searchTokens']; }
+    function animeOk(d, id) {
+      return exact(d, animeKeys())
+        && reqStr(d.title, 200) && d.slug == id && reqStr(d.slug, 120) && str(d.description, 5000)
+        && d.alternativeTitles is list && d.alternativeTitles.size() <= 20
+        && urlOk(d.posterUrl) && urlOk(d.coverUrl) && urlOk(d.bannerUrl)
+        && d.genres is list && d.genres.size() <= 20
+        && d.releaseYear is int && d.releaseYear >= 1900 && d.releaseYear <= 2100
+        && d.status in ['ongoing','completed','upcoming']
+        && d.animeType in ['TV','Movie','OVA','ONA','Special']
+        && d.rating is number && d.rating >= 0 && d.rating <= 10
+        && d.featured is bool && d.visibility in ['public','hidden']
+        && d.createdAt is timestamp && d.updatedAt is timestamp
+        && str(d.titleLower, 200) && d.searchTokens is list && d.searchTokens.size() <= 300;
+    }
+    match /anime/{animeId} {
+      allow read: if isContentStaff() || resource.data.visibility == 'public';
+      allow create, update: if isContentStaff() && animeOk(request.resource.data, animeId);
+      allow delete: if isContentStaff();
+    }
+
+    function seasonOk(d) {
+      return exact(d, ['animeId','seasonNumber','title','description','releaseYear','sortOrder','isPublished'])
+        && reqStr(d.animeId, 120) && d.seasonNumber is int && d.seasonNumber >= 1 && d.seasonNumber <= 99
+        && str(d.title, 120) && str(d.description, 2000)
+        && d.releaseYear is int && d.releaseYear >= 1900 && d.releaseYear <= 2100
+        && d.sortOrder is int && d.isPublished is bool;
+    }
+    match /seasons/{seasonId} {
+      allow read: if isContentStaff() || resource.data.isPublished == true;
+      allow create, update: if isContentStaff() && seasonOk(request.resource.data);
+      allow delete: if isContentStaff();
+    }
+
+    function episodeOk(d) {
+      return exact(d, ['animeId','animeTitle','seasonId','episodeNumber','title','description','thumbnailUrl','durationSeconds','releaseAt','isPublished','createdAt','updatedAt'])
+        && reqStr(d.animeId, 120) && str(d.animeTitle, 200) && reqStr(d.seasonId, 140)
+        && d.episodeNumber is int && d.episodeNumber >= 1 && d.episodeNumber <= 9999
+        && str(d.title, 200) && str(d.description, 2000) && urlOk(d.thumbnailUrl)
+        && d.durationSeconds is int && d.durationSeconds >= 0 && d.durationSeconds <= 86400
+        && d.releaseAt is timestamp && d.isPublished is bool
+        && d.createdAt is timestamp && d.updatedAt is timestamp;
+    }
+    match /episodes/{episodeId} {
+      allow read: if isContentStaff() || resource.data.isPublished == true;
+      allow create, update: if isContentStaff() && episodeOk(request.resource.data);
+      allow delete: if isContentStaff();
+    }
+
+    // Sources are readable when active. Keep sources inactive until the episode is published (see README: limitation).
+    function sourceOk(d) {
+      return exact(d, ['episodeId','sourceName','displayLabel','provider','sourceType','embedUrl','directVideoUrl','language','qualityLabel','tracks','isDefault','isActive','sortOrder','createdAt','updatedAt'])
+        && reqStr(d.episodeId, 160) && reqStr(d.sourceName, 80) && str(d.displayLabel, 60)
+        && d.provider in ['youtube','vimeo','dailymotion','gdrive','direct']
+        && d.sourceType in ['embed','direct']
+        && urlOk(d.embedUrl) && urlOk(d.directVideoUrl)
+        && (d.sourceType == 'embed'
+            ? d.embedUrl.matches('^https://(www\\.youtube-nocookie\\.com/embed/|player\\.vimeo\\.com/video/|www\\.dailymotion\\.com/embed/video/|drive\\.google\\.com/file/d/)[^ ]+$') && d.directVideoUrl == ''
+            : d.directVideoUrl.matches('^https://[^ ]+\\.(mp4|webm|ogv|m4v)(\\?[^ ]*)?$') && d.embedUrl == '')
+        && str(d.language, 30) && str(d.qualityLabel, 20)
+        && d.tracks is list && d.tracks.size() <= 20
+        && d.isDefault is bool && d.isActive is bool && d.sortOrder is int
+        && d.createdAt is timestamp && d.updatedAt is timestamp;
+    }
+    match /episodeSources/{sourceId} {
+      allow read: if isContentStaff() || resource.data.isActive == true;
+      allow create, update: if isContentStaff() && sourceOk(request.resource.data);
+      allow delete: if isContentStaff();
+    }
+
+    match /genres/{genreId} {
+      allow read: if true;
+      allow create, update: if isContentStaff()
+        && exact(request.resource.data, ['name','slug','description','createdAt'])
+        && reqStr(request.resource.data.name, 50) && request.resource.data.slug == genreId
+        && str(request.resource.data.description, 300) && request.resource.data.createdAt is timestamp;
+      allow delete: if isContentStaff();
+    }
+
+    match /featuredContent/{contentId} {
+      allow read: if isContentStaff() || resource.data.active == true;
+      allow create, update: if isContentStaff()
+        && exact(request.resource.data, ['animeId','section','sortOrder','active'])
+        && reqStr(request.resource.data.animeId, 120)
+        && request.resource.data.section in ['hero','featured','trending','recommended']
+        && request.resource.data.sortOrder is int && request.resource.data.active is bool;
+      allow delete: if isContentStaff();
+    }
+
+    // ---------- per-user data ----------
+    match /watchlists/{uid}/items/{animeId} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && exact(request.resource.data, ['animeId','addedAt'])
+        && request.resource.data.animeId == animeId
+        && request.resource.data.addedAt == request.time;
+      allow delete: if isOwner(uid);
+    }
+
+    function progressOk(d, episodeId) {
+      return exact(d, ['animeId','episodeId','currentTimeSeconds','durationSeconds','completed','updatedAt','episodeNumber','episodeTitle','animeTitle','posterUrl'])
+        && reqStr(d.animeId, 120) && d.episodeId == episodeId
+        && d.currentTimeSeconds is int && d.currentTimeSeconds >= 0 && d.currentTimeSeconds <= 86400
+        && d.durationSeconds is int && d.durationSeconds >= 0 && d.durationSeconds <= 86400
+        && d.completed is bool && d.updatedAt == request.time
+        && d.episodeNumber is int && str(d.episodeTitle, 200) && str(d.animeTitle, 200) && urlOk(d.posterUrl);
+    }
+    match /watchProgress/{uid}/episodes/{episodeId} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && progressOk(request.resource.data, episodeId);
+    }
+
+    // ---------- reviews (Phase 2 UI; rules ready) ----------
+    function reviewOk(d) {
+      return d.keys().hasAll(['uid','animeId','rating','comment','status','createdAt','updatedAt']) && d.keys().hasOnly(['uid','animeId','rating','comment','status','createdAt','updatedAt'])
+        && d.uid == request.auth.uid && reqStr(d.animeId, 120)
+        && d.rating is int && d.rating >= 1 && d.rating <= 10 && str(d.comment, 1000);
+    }
+    match /reviews/{reviewId} {
+      allow read: if isModerator() || resource.data.status == 'approved' || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if signedIn() && reviewOk(request.resource.data)
+        && reviewId == request.auth.uid + '_' + request.resource.data.animeId
+        && request.resource.data.status == 'pending';
+      allow update: if (isModerator() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt']) && request.resource.data.status in ['approved','hidden','pending'])
+        || (signedIn() && resource.data.uid == request.auth.uid && reviewOk(request.resource.data) && request.resource.data.status == 'pending');
+      allow delete: if isModerator() || (signedIn() && resource.data.uid == request.auth.uid);
+    }
+
+    // ---------- notifications (Phase 2) ----------
+    match /notifications/{id} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow update: if signedIn() && resource.data.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow create, delete: if isAdmin();
+    }
+
+    // ---------- reports ----------
+    match /reports/{reportId} {
+      allow read: if isModerator() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if signedIn()
+        && exact(request.resource.data, ['uid','contentType','contentId','reason','details','status','createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.contentType in ['episode','anime','review']
+        && reqStr(request.resource.data.contentId, 200)
+        && request.resource.data.reason in ['not_playing','wrong_episode','bad_quality','subtitles','other']
+        && str(request.resource.data.details, 500)
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdAt == request.time;
+      allow update: if isModerator()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','reviewedBy','reviewedAt'])
+        && request.resource.data.status in ['open','resolved','dismissed'];
+      allow delete: if isAdmin();
+    }
+
+    // ---------- audit log: client-written, therefore NOT tamper-proof ----------
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAnyStaff()
+        && exact(request.resource.data, ['actorUid','action','resourceType','resourceId','createdAt'])
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && str(request.resource.data.action, 40) && str(request.resource.data.resourceType, 40) && str(request.resource.data.resourceId, 200);
+      allow update, delete: if false;
+    }
+
+    // ---------- subscriptions: read-only for the owner; no client writes without a trusted payment backend ----------
+    match /subscriptions/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if false;
+    }
+
+    // Everything else is denied.
+    match /{document=**} { allow read, write: if false; }
+  }
+}
