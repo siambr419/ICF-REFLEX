@@ -1,0 +1,20 @@
+:root,:root[data-theme="dark"]{
+  color-scheme:dark;
+  --primary:#8B5CF6;--secondary:#A78BFA;--bg:#09090F;--surface:#171522;--elevated:#211C30;
+  --text:#F8F7FC;--text-2:#B8B2C8;--accent:#C4B5FD;--border:#302A40;
+  --success:#22C55E;--warning:#F59E0B;--error:#EF4444;
+  --on-primary:#09090F;--link:#C4B5FD;--shadow:0 10px 30px rgba(0,0,0,.5);--scrim:rgba(9,9,15,.75);
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --primary:#7C3AED;--secondary:#6D28D9;--bg:#F8F7FC;--surface:#FFFFFF;--elevated:#F0ECF8;
+  --text:#171326;--text-2:#625B70;--accent:#8B5CF6;--border:#E4DDEF;
+  --success:#15803D;--warning:#B45309;--error:#DC2626;
+  --on-primary:#FFFFFF;--link:#6D28D9;--shadow:0 10px 30px rgba(23,19,38,.14);--scrim:rgba(23,19,38,.45);
+}
+:root{
+  --font-heading:"Space Grotesk","Noto Sans JP","Noto Sans Bengali",system-ui,sans-serif;
+  --font-body:"Inter","Noto Sans JP","Noto Sans Bengali",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:24px;--sp-6:32px;--sp-7:48px;--sp-8:64px;
+  --radius:14px;--radius-sm:8px;--maxw:1440px;--header-h:72px;
+}
