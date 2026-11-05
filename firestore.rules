@@ -10,6 +10,10 @@ service cloud.firestore {
     // ---------- helpers ----------
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    // Verified email required for user-data features (watchlist, progress, reports, profile edits). Staff catalog writes are NOT gated on it,
+    // so legitimate admins created in the console are never locked out. The claim refreshes after the user verifies and re-authenticates / refreshes the token.
+    function isVerifiedOwner(uid) { return isOwner(uid) && request.auth.token.email_verified == true; }
+    function verified() { return signedIn() && request.auth.token.email_verified == true; }
     function role() {
       return signedIn() && exists(/databases/$(database)/documents/userRoles/$(request.auth.uid))
         ? get(/databases/$(database)/documents/userRoles/$(request.auth.uid)).data.role
@@ -44,7 +48,7 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time
         && userFieldsOk(request.resource.data);
-      allow update: if isOwner(uid)
+      allow update: if isVerifiedOwner(uid)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName','photoURL','preferredLanguage','theme','updatedAt'])
         && request.resource.data.updatedAt == request.time
         && userFieldsOk(request.resource.data);
@@ -85,52 +89,94 @@ service cloud.firestore {
       allow delete: if isContentStaff();
     }
 
+    // Parent-visibility rules.
+    // `animePublic` on seasons/episodes mirrors "the parent anime is public". The admin panel keeps it in sync, and every write is checked here
+    // against the real anime document, so it cannot be set to a value that disagrees with the anime at write time. Public queries must filter
+    // on isPublished == true AND animePublic == true (see services/episode-service.js). Hidden anime therefore expose no season/episode lists.
+    function animeIsPublic(animeId) { return get(/databases/$(database)/documents/anime/$(animeId)).data.visibility == 'public'; }
+    function publicCatalogDoc() { return resource.data.isPublished == true && resource.data.get('animePublic', false) == true; }
+
     function seasonOk(d) {
-      return exact(d, ['animeId','seasonNumber','title','description','releaseYear','sortOrder','isPublished'])
+      return exact(d, ['animeId','seasonNumber','title','description','releaseYear','sortOrder','isPublished','animePublic'])
         && reqStr(d.animeId, 120) && d.seasonNumber is int && d.seasonNumber >= 1 && d.seasonNumber <= 99
         && str(d.title, 120) && str(d.description, 2000)
         && d.releaseYear is int && d.releaseYear >= 1900 && d.releaseYear <= 2100
-        && d.sortOrder is int && d.isPublished is bool;
+        && d.sortOrder is int && d.isPublished is bool
+        && d.animePublic is bool && d.animePublic == animeIsPublic(d.animeId);
     }
     match /seasons/{seasonId} {
-      allow read: if isContentStaff() || resource.data.isPublished == true;
+      allow read: if isContentStaff() || publicCatalogDoc();
       allow create, update: if isContentStaff() && seasonOk(request.resource.data);
       allow delete: if isContentStaff();
     }
 
     function episodeOk(d) {
-      return exact(d, ['animeId','animeTitle','seasonId','episodeNumber','title','description','thumbnailUrl','durationSeconds','releaseAt','isPublished','createdAt','updatedAt'])
+      return exact(d, ['animeId','animeTitle','seasonId','episodeNumber','title','description','thumbnailUrl','durationSeconds','releaseAt','isPublished','animePublic','createdAt','updatedAt'])
         && reqStr(d.animeId, 120) && str(d.animeTitle, 200) && reqStr(d.seasonId, 140)
         && d.episodeNumber is int && d.episodeNumber >= 1 && d.episodeNumber <= 9999
         && str(d.title, 200) && str(d.description, 2000) && urlOk(d.thumbnailUrl)
         && d.durationSeconds is int && d.durationSeconds >= 0 && d.durationSeconds <= 86400
         && d.releaseAt is timestamp && d.isPublished is bool
+        && d.animePublic is bool && d.animePublic == animeIsPublic(d.animeId)
         && d.createdAt is timestamp && d.updatedAt is timestamp;
     }
     match /episodes/{episodeId} {
-      allow read: if isContentStaff() || resource.data.isPublished == true;
+      allow read: if isContentStaff() || publicCatalogDoc();
       allow create, update: if isContentStaff() && episodeOk(request.resource.data);
       allow delete: if isContentStaff();
     }
 
-    // Sources are readable when active. Keep sources inactive until the episode is published (see README: limitation).
+    // Sources are readable by the public only when (a) the source is active AND (b) its episode is published AND (c) that episode's anime is public.
+    // (b)+(c) are read from the parent episode document, so sources of unpublished episodes / hidden anime cannot be listed or fetched.
+    // Queries must filter on episodeId (the parent is looked up from it). Note: a URL a viewer has already received cannot be made secret again.
+    function episodeIsPublic(episodeId) {
+      let e = get(/databases/$(database)/documents/episodes/$(episodeId)).data;
+      return e.isPublished == true && e.get('animePublic', false) == true;
+    }
+    // One embed provider per URL shape. ABYSS HOST: keep in sync with public/js/utils/url-validator.js (ABYSS_EMBED_HOSTS) and the CSP frame-src.
+    function embedUrlOk(p, u) {
+      return (p == 'youtube' && u.matches('^https://www\\.youtube-nocookie\\.com/embed/[^ ]+$'))
+        || (p == 'vimeo' && u.matches('^https://player\\.vimeo\\.com/video/[^ ]+$'))
+        || (p == 'dailymotion' && u.matches('^https://www\\.dailymotion\\.com/embed/video/[^ ]+$'))
+        || (p == 'gdrive' && u.matches('^https://drive\\.google\\.com/file/d/[^ ]+$'))
+        || (p == 'abyss' && u.matches('^https://abysscdn\\.com/\\?v=[A-Za-z0-9_-]{5,40}$'));
+    }
     function sourceOk(d) {
       return exact(d, ['episodeId','sourceName','displayLabel','provider','sourceType','embedUrl','directVideoUrl','language','qualityLabel','tracks','isDefault','isActive','sortOrder','createdAt','updatedAt'])
         && reqStr(d.episodeId, 160) && reqStr(d.sourceName, 80) && str(d.displayLabel, 60)
-        && d.provider in ['youtube','vimeo','dailymotion','gdrive','direct']
+        && d.provider in ['youtube','vimeo','dailymotion','gdrive','abyss','direct']
         && d.sourceType in ['embed','direct']
         && urlOk(d.embedUrl) && urlOk(d.directVideoUrl)
         && (d.sourceType == 'embed'
-            ? d.embedUrl.matches('^https://(www\\.youtube-nocookie\\.com/embed/|player\\.vimeo\\.com/video/|www\\.dailymotion\\.com/embed/video/|drive\\.google\\.com/file/d/)[^ ]+$') && d.directVideoUrl == ''
-            : d.directVideoUrl.matches('^https://[^ ]+\\.(mp4|webm|ogv|m4v)(\\?[^ ]*)?$') && d.embedUrl == '')
+            ? embedUrlOk(d.provider, d.embedUrl) && d.directVideoUrl == ''
+            : d.provider == 'direct' && d.directVideoUrl.matches('^https://[^ ]+\\.(mp4|webm|ogv|m4v)(\\?[^ ]*)?$') && d.embedUrl == '')
         && str(d.language, 30) && str(d.qualityLabel, 20)
         && d.tracks is list && d.tracks.size() <= 20
         && d.isDefault is bool && d.isActive is bool && d.sortOrder is int
         && d.createdAt is timestamp && d.updatedAt is timestamp;
     }
     match /episodeSources/{sourceId} {
-      allow read: if isContentStaff() || resource.data.isActive == true;
+      allow read: if isContentStaff() || (resource.data.isActive == true && episodeIsPublic(resource.data.episodeId));
       allow create, update: if isContentStaff() && sourceOk(request.resource.data);
+      allow delete: if isContentStaff();
+    }
+
+    // ---------- posters (admin library of image URLs; applied to anime through the existing anime image fields) ----------
+    function posterOk(d) {
+      return exact(d, ['title','animeId','imageUrl','type','altText','isPublished','displayOrder','createdAt','updatedAt','createdBy'])
+        && reqStr(d.title, 120) && str(d.animeId, 120)
+        && (d.animeId == '' || exists(/databases/$(database)/documents/anime/$(d.animeId)))
+        && d.imageUrl is string && d.imageUrl.size() <= 2048 && d.imageUrl.matches('^https://[^ ]+$')
+        && d.type in ['poster','backdrop','banner','thumbnail']
+        && str(d.altText, 200) && d.isPublished is bool && d.displayOrder is int && d.displayOrder >= 0 && d.displayOrder <= 9999
+        && d.createdAt is timestamp && d.updatedAt is timestamp && d.updatedAt == request.time && d.createdBy is string;
+    }
+    match /posters/{posterId} {
+      allow read: if isContentStaff();
+      allow create: if isContentStaff() && posterOk(request.resource.data)
+        && request.resource.data.createdAt == request.time && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isContentStaff() && posterOk(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt && request.resource.data.createdBy == resource.data.createdBy;
       allow delete: if isContentStaff();
     }
 
@@ -156,7 +202,7 @@ service cloud.firestore {
     // ---------- per-user data ----------
     match /watchlists/{uid}/items/{animeId} {
       allow read: if isOwner(uid);
-      allow create: if isOwner(uid)
+      allow create: if isVerifiedOwner(uid)
         && exact(request.resource.data, ['animeId','addedAt'])
         && request.resource.data.animeId == animeId
         && request.resource.data.addedAt == request.time;
@@ -173,7 +219,7 @@ service cloud.firestore {
     }
     match /watchProgress/{uid}/episodes/{episodeId} {
       allow read, delete: if isOwner(uid);
-      allow create, update: if isOwner(uid) && progressOk(request.resource.data, episodeId);
+      allow create, update: if isVerifiedOwner(uid) && progressOk(request.resource.data, episodeId);
     }
 
     // ---------- reviews (Phase 2 UI; rules ready) ----------
@@ -184,7 +230,7 @@ service cloud.firestore {
     }
     match /reviews/{reviewId} {
       allow read: if isModerator() || resource.data.status == 'approved' || (signedIn() && resource.data.uid == request.auth.uid);
-      allow create: if signedIn() && reviewOk(request.resource.data)
+      allow create: if verified() && reviewOk(request.resource.data)
         && reviewId == request.auth.uid + '_' + request.resource.data.animeId
         && request.resource.data.status == 'pending';
       allow update: if (isModerator() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt']) && request.resource.data.status in ['approved','hidden','pending'])
@@ -203,7 +249,7 @@ service cloud.firestore {
     // ---------- reports ----------
     match /reports/{reportId} {
       allow read: if isModerator() || (signedIn() && resource.data.uid == request.auth.uid);
-      allow create: if signedIn()
+      allow create: if verified()
         && exact(request.resource.data, ['uid','contentType','contentId','reason','details','status','createdAt'])
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.contentType in ['episode','anime','review']
@@ -234,6 +280,14 @@ service cloud.firestore {
       allow read: if isOwner(uid) || isAdmin();
       allow write: if false;
     }
+
+    // ---------- orphan cleanup after an anime is deleted ----------
+    // Collection-group access (admin "delete anime" cascade). Content staff may read/delete watch-progress and watchlist documents ONLY when the anime they
+    // reference no longer exists, so staff can never read or erase other users' data for live anime. The client additionally filters by document path.
+    // (These recursive matches also cover the catalog's own /episodes documents; they merely add the same orphan-only staff access there.)
+    function referencedAnimeGone() { return !exists(/databases/$(database)/documents/anime/$(resource.data.animeId)); }
+    match /{path=**}/episodes/{id} { allow read, delete: if isContentStaff() && referencedAnimeGone(); }
+    match /{path=**}/items/{id}    { allow read, delete: if isContentStaff() && referencedAnimeGone(); }
 
     // Everything else is denied.
     match /{document=**} { allow read, write: if false; }

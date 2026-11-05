@@ -2,18 +2,24 @@
   "name": "icf-reflex",
   "private": true,
   "version": "1.0.0",
-  "description": "ICF REFLEX — vanilla HTML/CSS/JS anime streaming interface on Firebase (Spark-compatible). npm is used only for dev/test tooling; the site itself has no build step.",
+  "description": "ICF REFLEX \u2014 vanilla HTML/CSS/JS anime streaming interface on Firebase (Spark-compatible). npm is used only for dev/test tooling; the site itself has no build step.",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
-    "test:unit": "node --test tests/url-validator.test.mjs",
-    "test:rules": "firebase emulators:exec --only firestore \"node --test tests/firestore.rules.test.mjs\"",
+    "test": "npm run test:unit",
+    "test:unit": "node --test \"tests/unit/*.test.mjs\"",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-icf-reflex \"node --test tests/rules/firestore.rules.test.mjs\"",
+    "indexes": "node scripts/generate-indexes.mjs",
     "pages": "python3 scripts/generate-pages.py",
-    "sitemap": "node scripts/generate-sitemap.mjs"
+    "sitemap": "node scripts/generate-sitemap.mjs",
+    "test:e2e": "node tests/e2e/run.mjs && node tests/e2e/admin-flows.mjs"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^4.0.1",
     "firebase": "^12.0.0",
     "firebase-tools": "^14.0.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
