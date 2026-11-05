@@ -41,6 +41,7 @@ P = [
  ('admin/anime.html','admin-anime','Admin · Anime','Manage anime.','content',True),
  ('admin/seasons.html','admin-seasons','Admin · Seasons','Manage seasons.','content',True),
  ('admin/episodes.html','admin-episodes','Admin · Episodes','Manage episodes.','content',True),
+ ('admin/posters.html','admin-posters','Admin · Poster Manager','Manage posters.','content',True),
  ('admin/video.html','admin-video','Admin · Video sources','Manage video sources.','content',True),
  ('admin/genres.html','admin-genres','Admin · Genres','Manage genres.','content',True),
  ('admin/featured.html','admin-featured','Admin · Featured','Manage featured content.','content',True),
