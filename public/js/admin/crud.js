@@ -14,7 +14,7 @@ const initial = (f, item) => {
   return v ?? '';
 };
 
-function fieldHtml(f, item) {
+export function fieldHtml(f, item) {
   const v = initial(f, item), id = `f-${f.name}`, locked = f.lockOnEdit && item ? raw(' disabled') : '', req = f.required ? raw(' required') : '';
   const help = f.help ? html`<p class="help">${f.help}</p>` : '';
   const label = html`<label for="${id}">${f.label}${f.required ? raw(' <span aria-hidden="true">*</span>') : ''}</label>`;
@@ -27,10 +27,10 @@ function fieldHtml(f, item) {
     case 'datetime': return html`<div class="field">${label}<input id="${id}" name="${f.name}" type="datetime-local" value="${v}"${req}>${help}</div>`;
     case 'imageUrl': return html`<div class="field">${label}<input id="${id}" name="${f.name}" type="url" maxlength="2048" value="${v}" placeholder="https://…" data-preview="${id}-img"${req}>${help}<img class="url-preview" id="${id}-img" alt="Image preview" ${validateImageUrl(v).ok ? raw(`src="${validateImageUrl(v).href.replace(/"/g, '%22')}"`) : raw('hidden')} referrerpolicy="no-referrer"></div>`;
     case 'preview': return html`<div class="field"><button class="btn btn-sm" type="button" id="preview-btn">Preview this source</button><p class="form-error" id="preview-err" role="alert"></p><div class="player preview-box" id="preview-player" hidden></div></div>`;
-    default: return html`<div class="field">${label}<input id="${id}" name="${f.name}" type="${f.type === 'url' ? 'url' : 'text'}" maxlength="${f.max || 300}" value="${v}"${req}${locked}>${help}</div>`;
+    default: return html`<div class="field">${label}<input id="${id}" name="${f.name}" type="${f.type === 'url' ? 'url' : 'text'}" maxlength="${f.max || 300}" value="${v}"${f.placeholder ? raw(` placeholder="${String(f.placeholder).replace(/"/g, '&quot;')}"`) : ''}${req}${locked}>${help}</div>`;
   }
 }
-function readForm(form, fields, existing) {
+export function readForm(form, fields, existing) {
   const fd = new FormData(form), out = {};
   for (const f of fields) {
     if (f.type === 'preview') continue;
@@ -56,6 +56,7 @@ export function mountCrud(root, cfg) {
   const st = { items: [], cursor: null, done: true, filter: '' };
   mount(root, html`<div class="admin-bar"><h1>${cfg.title}</h1><div class="admin-bar-actions">
       ${cfg.searchable ? html`<label class="sr-only" for="crud-filter">Filter loaded rows</label><input id="crud-filter" type="search" placeholder="Filter loaded rows…">` : ''}
+      ${(cfg.toolbar || []).map((t, n) => html`<button class="btn" type="button" data-tool="${n}">${t.label}</button>`)}
       ${cfg.readOnly || cfg.canCreate === false ? '' : html`<button class="btn btn-primary" id="crud-new" type="button">New ${cfg.singular}</button>`}</div></div>
     ${cfg.intro ? html`<p class="help">${cfg.intro}</p>` : ''}<div id="crud-table"></div><div class="center"><button id="crud-more" class="btn" type="button" hidden>Load more</button></div>`);
   const tbl = $('#crud-table', root), more = $('#crud-more', root);
@@ -66,16 +67,16 @@ export function mountCrud(root, cfg) {
     const r = rows();
     if (!r.length) { mount(tbl, emptyState(st.filter ? 'No matching rows' : cfg.emptyTitle || `No ${cfg.title.toLowerCase()} yet`, st.filter ? 'Clear the filter or load more rows.' : cfg.emptyText || '')); return; }
     const editable = !cfg.readOnly && (typeof cfg.fields === 'function' || cfg.fields?.length);
-    mount(tbl, html`<div class="table-wrap"><table><caption class="sr-only">${cfg.title}</caption><thead><tr>${cfg.columns.map((c) => html`<th scope="col">${c.label}</th>`)}<th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
-      <tbody>${r.map((i) => html`<tr data-id="${i.id}">${cfg.columns.map((c) => html`<td>${c.value(i)}</td>`)}<td><div class="row-actions">
-        ${(cfg.rowActions || []).map((a, n) => html`<button class="btn btn-sm" type="button" data-act="${n}">${a.label}</button>`)}
+    mount(tbl, html`<div class="table-wrap stack-sm"><table><caption class="sr-only">${cfg.title}</caption><thead><tr>${cfg.columns.map((c) => html`<th scope="col">${c.label}</th>`)}<th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <tbody>${r.map((i) => html`<tr data-id="${i.id}">${cfg.columns.map((c) => html`<td data-label="${c.label}">${c.value(i)}</td>`)}<td class="actions-cell"><div class="row-actions">
+        ${(cfg.rowActions || []).map((a, n) => (a.when && !a.when(i) ? '' : html`<button class="btn btn-sm" type="button" data-act="${n}">${typeof a.label === 'function' ? a.label(i) : a.label}</button>`))}
         ${editable ? html`<button class="btn btn-sm" type="button" data-edit>${cfg.editLabel || 'Edit'}</button>` : ''}
         ${cfg.readOnly || cfg.canDelete === false ? '' : html`<button class="btn btn-sm btn-danger" type="button" data-del>Delete</button>`}</div></td></tr>`)}</tbody></table></div>`);
   }
   async function fetchMore(reset) {
     if (reset) { st.items = []; st.cursor = null; mount(tbl, html`<div class="skeleton" aria-busy="true">&nbsp;<br>&nbsp;<br>&nbsp;<br>&nbsp;</div>`); }
     try { const r = await cfg.fetch(st.cursor); st.items = st.items.concat(r.items); st.cursor = r.cursor; st.done = r.done; draw(); more.hidden = st.done; }
-    catch (e) { console.error(e); mount(tbl, errorState(explainError(e))); $('[data-retry]', tbl)?.addEventListener('click', () => fetchMore(true)); }
+    catch (e) { console.error(e); mount(tbl, errorState(e)); $('[data-retry]', tbl)?.addEventListener('click', () => fetchMore(true)); }
   }
   function openForm(existing) {
     const fields = typeof cfg.fields === 'function' ? cfg.fields(existing) : cfg.fields;
@@ -102,12 +103,17 @@ export function mountCrud(root, cfg) {
     });
   }
   $('#crud-new', root)?.addEventListener('click', () => openForm(null));
+  delegate(root, 'click', '[data-tool]', async (e, b) => { b.disabled = true; try { await cfg.toolbar[Number(b.dataset.tool)].run({ reload: () => fetchMore(true) }); } catch (ex) { console.error(ex); toast(ex.userMessage || explainError(ex), 'error'); } finally { b.disabled = false; } });
   $('#crud-filter', root)?.addEventListener('input', (e) => { st.filter = e.target.value.trim().toLowerCase(); draw(); });
   more.addEventListener('click', () => fetchMore(false));
   delegate(tbl, 'click', 'button', async (e, b) => {
     const item = st.items.find((i) => i.id === b.closest('tr')?.dataset.id); if (!item) return;
     if (b.hasAttribute('data-edit')) openForm(item);
-    else if (b.dataset.act != null) cfg.rowActions[Number(b.dataset.act)].run(item);
+    else if (b.dataset.act != null) {
+      b.disabled = true;
+      try { const r = await cfg.rowActions[Number(b.dataset.act)].run(item); if (r === 'reload') await fetchMore(true); }
+      catch (ex) { console.error(ex); toast(ex.userMessage || explainError(ex), 'error'); } finally { b.disabled = false; }
+    }
     else if (b.hasAttribute('data-del')) {
       if (!(await confirmModal(cfg.deleteMessage ? cfg.deleteMessage(item) : `Delete this ${cfg.singular}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
       try { await cfg.remove(item); toast(`${cfg.singular[0].toUpperCase() + cfg.singular.slice(1)} deleted.`, 'success'); await fetchMore(true); }

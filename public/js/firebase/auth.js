@@ -1,5 +1,5 @@
 import { app } from './config.js';
-import { requireDb, doc, getDoc, setDoc, serverTimestamp } from './firestore.js';
+import { requireDb, doc, getDoc, runTransaction, serverTimestamp } from './firestore.js';
 import {
   initializeAuth, indexedDBLocalPersistence, browserLocalPersistence, onAuthStateChanged,
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail,
@@ -29,27 +29,59 @@ const MESSAGES = {
 };
 export const friendlyAuthError = (e) => MESSAGES[e?.code] || 'Something went wrong. Please try again.';
 
+const TRANSIENT = new Set(['unavailable', 'deadline-exceeded', 'aborted', 'resource-exhausted', 'internal']);
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const profileError = (e) => Object.assign(new Error('profile'), {
+  code: e?.code, userMessage: e?.code === 'permission-denied'
+    ? 'Your account was created, but your profile could not be saved (permission denied). Make sure the latest firestore.rules are deployed, then log in again.'
+    : 'Your account was created, but your profile could not be saved. Check your connection, then log in again to retry.',
+});
+/**
+ * Idempotent: creates users/{uid} only when it does not exist (transaction), never overwrites an existing profile and is safe to
+ * call from several tabs. Transient failures are retried; any other failure is thrown with a user-facing message (never swallowed).
+ */
 export async function ensureUserDoc(user, extra = {}) {
   const ref = doc(requireDb(), 'users', user.uid);
-  const s = await getDoc(ref);
-  if (s.exists()) return;
-  await setDoc(ref, {
-    uid: user.uid, displayName: (extra.displayName || user.displayName || '').slice(0, 60), email: user.email || '',
-    photoURL: '', preferredLanguage: 'en', theme: localStorage.getItem('icf-theme') === 'light' ? 'light' : 'dark',
-    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), accountStatus: 'active',
-  });
+  let last;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await runTransaction(requireDb(), async (tx) => {
+        if ((await tx.get(ref)).exists()) return;
+        tx.set(ref, {
+          uid: user.uid, displayName: (extra.displayName || user.displayName || '').slice(0, 60), email: user.email || '',
+          photoURL: '', preferredLanguage: 'en', theme: localStorage.getItem('icf-theme') === 'light' ? 'light' : 'dark',
+          createdAt: serverTimestamp(), updatedAt: serverTimestamp(), accountStatus: 'active',
+        });
+      });
+      return;
+    } catch (e) {
+      last = e;
+      if (!TRANSIENT.has(e?.code)) break;
+      await wait(400 * 2 ** attempt);
+    }
+  }
+  console.error('ensureUserDoc failed', last?.code, last?.message);
+  throw profileError(last);
 }
 export async function register({ name, email, password }) {
   const cred = await createUserWithEmailAndPassword(auth, email, password);
   await updateProfile(cred.user, { displayName: name });
-  try { await ensureUserDoc(cred.user, { displayName: name }); } catch (e) { console.warn('Profile document not created:', e.code); }
-  try { await sendEmailVerification(cred.user); } catch (e) { console.warn('Verification email failed:', e.code); }
-  return cred.user;
+  let verifyError = null;
+  try { await sendEmailVerification(cred.user); } catch (e) { verifyError = e; console.warn('Verification email failed:', e.code); }
+  await ensureUserDoc(cred.user, { displayName: name }); // throws a user-facing error; the account itself already exists
+  return { user: cred.user, verifyError };
 }
 export async function login(email, password) {
   const cred = await signInWithEmailAndPassword(auth, email, password);
-  try { await ensureUserDoc(cred.user); } catch (e) { console.warn('ensureUserDoc', e.code); }
+  await ensureUserDoc(cred.user);
   return cred.user;
+}
+/** Re-reads the account from Firebase and refreshes the ID token so the `email_verified` claim used by firestore.rules is current. */
+export async function refreshVerification(user = auth?.currentUser) {
+  if (!user) return false;
+  await user.reload();
+  if (user.emailVerified) await user.getIdToken(true);
+  return !!auth.currentUser?.emailVerified;
 }
 export const logout = () => { sessionStorage.removeItem('icf-role'); return signOut(auth); };
 export const resetPassword = (email) => sendPasswordResetEmail(auth, email);
@@ -67,14 +99,19 @@ export async function getRole(uid, { force = false } = {}) {
   try { sessionStorage.setItem('icf-role', JSON.stringify({ uid, role, at: Date.now() })); } catch { /* ignore */ }
   return role;
 }
-export async function requireAuth() {
+/**
+ * Signed-in users are required. With `verified` (default) an unverified email is redirected to /verify-email: Firestore rules block
+ * their user data writes anyway (UX + defence in depth). Staff screens pass verified:false so legitimate admins are never locked out.
+ */
+export async function requireAuth({ verified = true } = {}) {
   const user = await authReady();
   if (!user) { location.replace(`/login?next=${encodeURIComponent(location.pathname + location.search)}`); return null; }
+  if (verified && !user.emailVerified) { location.replace(`/verify-email?next=${encodeURIComponent(location.pathname + location.search)}`); return null; }
   return user;
 }
 /** Returns {user, role} or null after rendering an "unauthorised" state. UX only: Firestore rules enforce the real limit. */
 export async function requireRole(guard) {
-  const user = await requireAuth();
+  const user = await requireAuth({ verified: false });
   if (!user) return null;
   const role = await getRole(user.uid, { force: true });
   if (!(GUARDS[guard] || []).includes(role)) return { user, role, denied: true };

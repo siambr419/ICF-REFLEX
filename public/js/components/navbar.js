@@ -27,6 +27,7 @@ export function renderNavbar() {
         <input id="nav-q" name="q" type="search" placeholder="${t('nav.search')}" autocomplete="off" maxlength="60">
         <button class="icon-btn" type="submit" aria-label="Search">${ICON.search}</button>
       </form>
+      <div class="nav-auth" id="nav-auth"></div>
     </nav>
     <div class="header-actions">
       <button class="icon-btn" id="theme-toggle" type="button" aria-label="${t('nav.theme')}">${ICON.theme}</button>
@@ -57,12 +58,16 @@ export function renderNavbar() {
 
 async function renderAuthArea() {
   const area = $('#auth-area'); if (!area) return;
-  const guestHtml = html`<a class="btn btn-sm" href="/login">${t('nav.login')}</a> <a class="btn btn-sm btn-primary" href="/register">${t('nav.register')}</a>`;
-  if (!configured) { mount(area, guestHtml); return; }
+  const guestLinks = html`<a class="btn btn-sm" href="/login">${t('nav.login')}</a> <a class="btn btn-sm btn-primary" href="/register">${t('nav.register')}</a>`;
+  // Guests: buttons in the header from 640px up; on phones they live inside the menu so the header never overflows.
+  const guestHtml = html`<div class="guest-actions">${guestLinks}</div>`;
+  const showGuest = () => { mount(area, guestHtml); const na = $('#nav-auth'); if (na) mount(na, guestLinks); };
+  if (!configured) { showGuest(); return; }
   const { onUser, getRole, logout } = await import('../firebase/auth.js');
   const { isStaff } = await import('../utils/permissions.js');
   onUser(async (user) => {
-    if (!user) { mount(area, guestHtml); return; }
+    if (!user) { showGuest(); return; }
+    const na = $('#nav-auth'); if (na) mount(na, html``);
     const role = await getRole(user.uid);
     const initial = (user.displayName || user.email || '?')[0].toUpperCase();
     mount(area, html`<div class="menu-wrap"><button class="icon-btn" id="user-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Account menu"><span class="avatar" aria-hidden="true">${initial}</span></button>

@@ -55,7 +55,7 @@ export default async function browse({ root, page }) {
       note.textContent = count ? `Showing ${count} result${count === 1 ? '' : 's'}${done ? '' : ' so far'}.` : '';
       more.hidden = done || !cursor;
     } catch (e) {
-      console.error(e); results.classList.remove('card-grid'); mount(results, errorState(explainError(e)));
+      console.error(e); results.classList.remove('card-grid'); mount(results, errorState(e));
       $('[data-retry]', results)?.addEventListener('click', () => load(true));
     } finally { busy = false; more.removeAttribute('aria-busy'); }
   }

@@ -1,5 +1,5 @@
 import { html, mount, $ } from '../utils/dom.js';
-import { auth, authReady, register, login, resetPassword, resendVerification, friendlyAuthError, checkResetCode, applyNewPassword } from '../firebase/auth.js';
+import { auth, authReady, register, login, resetPassword, resendVerification, refreshVerification, friendlyAuthError, checkResetCode, applyNewPassword } from '../firebase/auth.js';
 import { isEmail, validatePassword, validateName, safeNext } from '../utils/validators.js';
 import { toast } from '../components/toast.js';
 import { sleep } from '../utils/dom.js';
@@ -25,7 +25,7 @@ export default async function authPage({ root, page }) {
   const q = new URLSearchParams(location.search);
   const next = safeNext(q.get('next'));
   const user = await authReady();
-  if (user && ['login', 'register', 'forgot-password'].includes(page)) { location.replace(next); return; }
+  if (user && ['login', 'register', 'forgot-password'].includes(page)) { location.replace(user.emailVerified ? next : `/verify-email?next=${encodeURIComponent(next)}`); return; }
 
   if (page === 'login') {
     mount(root, card('Log in', html`<form class="form" novalidate>${field('email', 'Email', 'email', 'autocomplete="email"')}${field('password', 'Password', 'password', 'autocomplete="current-password"')}<p class="form-error" data-error role="alert"></p><button class="btn btn-primary" type="submit">Log in</button></form>`,
@@ -33,7 +33,8 @@ export default async function authPage({ root, page }) {
     bind($('form', root), async (v) => {
       if (!isEmail(v.email)) throw fail('Enter a valid email address.');
       if (!v.password) throw fail('Enter your password.');
-      await login(v.email.trim(), v.password); location.replace(next);
+      const u = await login(v.email.trim(), v.password);
+      location.replace(u.emailVerified ? next : `/verify-email?next=${encodeURIComponent(next)}`);
     });
   } else if (page === 'register') {
     mount(root, card('Create your account', html`<form class="form" novalidate>${field('name', 'Display name', 'text', 'autocomplete="nickname" maxlength="40"')}${field('email', 'Email', 'email', 'autocomplete="email"')}${field('password', 'Password', 'password', 'autocomplete="new-password"')}<p class="help">At least 8 characters, with a letter and a number.</p>${field('confirm', 'Confirm password', 'password', 'autocomplete="new-password"')}
@@ -42,7 +43,8 @@ export default async function authPage({ root, page }) {
     bind($('form', root), async (v) => {
       const e = validateName(v.name) || (!isEmail(v.email) && 'Enter a valid email address.') || validatePassword(v.password) || (v.password !== v.confirm && 'Passwords do not match.') || (!v.terms && 'Please accept the terms to continue.');
       if (e) throw fail(e);
-      await register({ name: v.name.trim(), email: v.email.trim(), password: v.password }); location.replace('/verify-email');
+      await register({ name: v.name.trim(), email: v.email.trim(), password: v.password });
+      location.replace(`/verify-email${next !== '/dashboard' ? '?next=' + encodeURIComponent(next) : ''}`);
     });
   } else if (page === 'forgot-password') {
     mount(root, card('Reset your password', html`<form class="form" novalidate>${field('email', 'Email', 'email', 'autocomplete="email"')}<p class="form-error" data-error role="alert"></p><button class="btn btn-primary" type="submit">Send reset link</button></form>`, html`<div class="auth-links"><a href="/login">Back to log in</a></div>`));
@@ -63,15 +65,23 @@ export default async function authPage({ root, page }) {
     });
   } else if (page === 'verify-email') {
     if (!user) { location.replace('/login?next=/verify-email'); return; }
-    if (user.emailVerified) { mount(root, card('Email verified', html`<p class="alert alert-ok">Your email address is verified.</p><a class="btn btn-primary" href="/dashboard">Go to dashboard</a>`)); return; }
-    mount(root, card('Verify your email', html`<p>We sent a verification link to <strong>${user.email}</strong>. Open it, then come back and press the button below.</p><p class="form-error" data-error role="alert"></p>
+    if (user.emailVerified) { mount(root, card('Email verified', html`<p class="alert alert-ok">Your email address is verified.</p><a class="btn btn-primary" href="${next}">Continue</a>`)); return; }
+    mount(root, card('Verify your email', html`<p>We sent a verification link to <strong>${user.email}</strong>. Open it, then come back here. This page checks automatically, or press the button below.</p><p class="form-error" data-error role="alert"></p><p class="muted" id="verify-status" role="status"></p>
       <div class="hero-actions"><button class="btn btn-primary" id="checked" type="button">I have verified</button><button class="btn" id="resend" type="button">Resend email</button></div>`));
-    const err = $('[data-error]', root);
-    $('#checked').addEventListener('click', async () => { await user.reload(); if (auth.currentUser.emailVerified) location.replace('/dashboard'); else err.textContent = 'Not verified yet. Open the link in the email first.'; });
+    const err = $('[data-error]', root), status = $('#verify-status', root);
+    const done = () => location.replace(next);
+    const check = async (manual) => {
+      try { if (await refreshVerification(user)) return done(); if (manual) err.textContent = 'Not verified yet. Open the link in the email first (check spam).'; }
+      catch (ex) { if (manual) err.textContent = friendlyAuthError(ex); }
+    };
+    $('#checked').addEventListener('click', () => { err.textContent = ''; check(true); });
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && check(false));
+    const timer = setInterval(() => check(false), 10000); addEventListener('pagehide', () => clearInterval(timer));
     $('#resend').addEventListener('click', async (e) => {
       const b = e.target; b.disabled = true; err.textContent = '';
-      try { await resendVerification(); toast('Verification email sent.', 'success'); } catch (ex) { err.textContent = friendlyAuthError(ex); }
-      await sleep(60000); b.disabled = false;
+      try { await resendVerification(); toast('Verification email sent.', 'success'); status.textContent = 'Email sent. You can request another in 60 seconds.'; }
+      catch (ex) { err.textContent = friendlyAuthError(ex); }
+      await sleep(60000); b.disabled = false; status.textContent = '';
     });
   }
 }

@@ -1,4 +1,4 @@
-import { requireDb, collection, query, orderBy, limit, getDocs, getDoc, setDoc, deleteDoc, doc, serverTimestamp, snap } from '../firebase/firestore.js';
+import { requireDb, collection, query, orderBy, limit, startAfter, getDocs, getDoc, setDoc, deleteDoc, doc, serverTimestamp, snap } from '../firebase/firestore.js';
 import { getAnime } from './anime-service.js';
 
 const ref = (uid, animeId) => doc(requireDb(), 'watchlists', uid, 'items', animeId);
@@ -10,7 +10,11 @@ export async function toggleWatchlist(uid, animeId) {
   return true;
 }
 export const removeFromWatchlist = (uid, animeId) => deleteDoc(ref(uid, animeId));
-export async function listWatchlist(uid, max = 60) {
-  const s = await getDocs(query(collection(requireDb(), 'watchlists', uid, 'items'), orderBy('addedAt', 'desc'), limit(max)));
-  return (await Promise.all(s.docs.map((d) => getAnime(snap(d).animeId)))).filter(Boolean);
+/** One page of the watchlist (newest first). Entries whose anime was deleted or hidden are skipped, never shown broken. */
+export async function listWatchlistPage(uid, { size = 24, cursor = null } = {}) {
+  const c = [orderBy('addedAt', 'desc')]; if (cursor) c.push(startAfter(cursor)); c.push(limit(size));
+  const s = await getDocs(query(collection(requireDb(), 'watchlists', uid, 'items'), ...c));
+  const items = (await Promise.all(s.docs.map((d) => getAnime(snap(d).animeId)))).filter(Boolean);
+  return { items, cursor: s.docs.at(-1) || null, done: s.size < size };
 }
+export const listWatchlist = async (uid, max = 60) => (await listWatchlistPage(uid, { size: max })).items;

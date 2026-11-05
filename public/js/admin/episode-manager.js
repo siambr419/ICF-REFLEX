@@ -3,7 +3,7 @@ import { adminShell, badge } from './shell.js';
 import { mountCrud } from './crud.js';
 import { audit } from './audit.js';
 import { deleteEpisodesWhere, deleteSourcesOf } from './cascade.js';
-import { loadAnimeOptions, loadSeasons, loadEpisodes, selectField } from './scope.js';
+import { mountAnimePicker, loadSeasons, loadEpisodes, getAnimeDoc } from './scope.js';
 import { emptyState } from '../components/states.js';
 import { requireDb, doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp } from '../firebase/firestore.js';
 import { formatDateTime } from '../utils/formatters.js';
@@ -12,14 +12,21 @@ const oops = (m) => Object.assign(new Error(m), { userMessage: m });
 
 async function scoped(ctx, build) {
   const main = adminShell(ctx);
-  const animes = await loadAnimeOptions();
-  mount(main, html`<div class="scope">${selectField('scope-anime', 'Anime', animes.map((a) => [a.id, a.title]), '', 'Select an anime…')}</div><div id="crud">${emptyState('Choose an anime', 'Pick an anime above to manage its content.')}</div>`);
-  $('#scope-anime', main).addEventListener('change', async (e) => {
-    const anime = animes.find((a) => a.id === e.target.value), holder = $('#crud', main);
-    if (!anime) { mount(holder, emptyState('Choose an anime', 'Pick an anime above to manage its content.')); return; }
-    await build(holder, anime);
+  mount(main, html`<div class="scope" id="picker"></div><div id="crud">${emptyState('Choose an anime', 'Search for an anime above to manage its content.')}</div>`);
+  mountAnimePicker($('#picker', main), {
+    onSelect: async (anime) => {
+      const holder = $('#crud', main);
+      if (!anime) { mount(holder, emptyState('Choose an anime', 'Search for an anime above to manage its content.')); return; }
+      await build(holder, anime);
+    },
   });
 }
+/** Reads the CURRENT visibility (the picker copy may be stale) so seasons/episodes get a correct `animePublic` flag. */
+const animePublicNow = async (animeId) => {
+  const a = await getAnimeDoc(animeId);
+  if (!a) throw oops('This anime no longer exists.');
+  return a.visibility === 'public';
+};
 
 export const seasons = (ctx) => scoped(ctx, async (holder, anime) => {
   const db = requireDb();
@@ -38,7 +45,7 @@ export const seasons = (ctx) => scoped(ctx, async (holder, anime) => {
     async save(v, existing) {
       const num = existing ? existing.seasonNumber : Math.trunc(v.seasonNumber), id = existing ? existing.id : `${anime.id}_s${num}`, ref = doc(db, 'seasons', id);
       if (!existing && (await getDoc(ref)).exists()) throw oops(`Season ${num} already exists for this anime.`);
-      await setDoc(ref, { animeId: anime.id, seasonNumber: num, title: v.title, description: v.description, releaseYear: Math.trunc(v.releaseYear ?? anime.releaseYear), sortOrder: Math.trunc(v.sortOrder ?? num), isPublished: v.isPublished });
+      await setDoc(ref, { animeId: anime.id, seasonNumber: num, title: v.title, description: v.description, releaseYear: Math.trunc(v.releaseYear ?? anime.releaseYear), sortOrder: Math.trunc(v.sortOrder ?? num), isPublished: v.isPublished, animePublic: await animePublicNow(anime.id) });
       audit(existing ? 'update' : 'create', 'season', id);
     },
     deleteMessage: (s) => `Delete "${s.title}" and all of its episodes and video sources?`,
@@ -68,7 +75,7 @@ export const episodes = (ctx) => scoped(ctx, async (holder, anime) => {
       const season = seasonList.find((s) => s.id === (existing ? existing.seasonId : v.seasonId));
       if (!season) throw oops('Choose a season.');
       const num = existing ? existing.episodeNumber : Math.trunc(v.episodeNumber), id = existing ? existing.id : `${anime.id}_s${season.seasonNumber}e${num}`, ref = doc(db, 'episodes', id);
-      const data = { animeId: anime.id, animeTitle: anime.title, seasonId: season.id, episodeNumber: num, title: v.title, description: v.description, thumbnailUrl: v.thumbnailUrl, durationSeconds: Math.trunc(v.durationSeconds ?? 0), releaseAt: v.releaseAt ? Timestamp.fromDate(v.releaseAt) : Timestamp.now(), isPublished: v.isPublished, updatedAt: serverTimestamp() };
+      const data = { animeId: anime.id, animeTitle: anime.title, seasonId: season.id, episodeNumber: num, title: v.title, description: v.description, thumbnailUrl: v.thumbnailUrl, durationSeconds: Math.trunc(v.durationSeconds ?? 0), releaseAt: v.releaseAt ? Timestamp.fromDate(v.releaseAt) : Timestamp.now(), isPublished: v.isPublished, animePublic: await animePublicNow(anime.id), updatedAt: serverTimestamp() };
       if (existing) await updateDoc(ref, data);
       else { if ((await getDoc(ref)).exists()) throw oops('This episode number already exists in the season.'); await setDoc(ref, { ...data, createdAt: serverTimestamp() }); }
       audit(existing ? 'update' : 'create', 'episode', id);

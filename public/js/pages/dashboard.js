@@ -1,6 +1,6 @@
 import { html, raw, mount, $, delegate } from '../utils/dom.js';
-import { listWatchlist, removeFromWatchlist } from '../services/watchlist-service.js';
-import { listProgress, percent } from '../services/progress-service.js';
+import { listWatchlist, listWatchlistPage, removeFromWatchlist } from '../services/watchlist-service.js';
+import { listProgress, listProgressPage, percent } from '../services/progress-service.js';
 import { getUserDoc, updateUserDoc } from '../services/account-service.js';
 import { animeCard, skeletonCards } from '../components/anime-card.js';
 import { imgTag } from '../components/media-img.js';
@@ -56,11 +56,22 @@ const PAGES = {
   },
   async watchlist({ root, user }) {
     const body = shell(root, 'Watchlist');
-    mount(body, html`<div id="list" class="card-grid">${skeletonCards(6)}</div>`);
-    const box = $('#list');
-    const render = async () => load(box, async () => { const a = await listWatchlist(user.uid); box.className = a.length ? 'card-grid' : ''; mount(box, a.length ? html`${a.map((x) => animeCard(x, { removable: true }))}` : emptyState('Your watchlist is empty', 'Save anime to find them here later.', raw('<a class="btn btn-primary" href="/browse">Browse anime</a>'))); });
-    await render();
-    delegate(box, 'click', '[data-remove]', async (e, b) => { b.disabled = true; try { await removeFromWatchlist(user.uid, b.dataset.remove); toast('Removed from watchlist.', 'success'); await render(); } catch { toast('Could not remove it. Please try again.', 'error'); b.disabled = false; } });
+    mount(body, html`<div id="list" class="card-grid">${skeletonCards(6)}</div><div class="center"><button id="more" class="btn" type="button" hidden>Load more</button></div>`);
+    const box = $('#list'), more = $('#more');
+    let cursor = null, shown = 0;
+    // Pages through the whole list; entries whose anime was deleted/hidden are skipped (a page may therefore hold fewer cards).
+    const render = async (reset) => load(box, async () => {
+      if (reset) { cursor = null; shown = 0; }
+      const r = await listWatchlistPage(user.uid, { size: 24, cursor });
+      cursor = r.cursor; shown += r.items.length;
+      if (reset) mount(box, html``);
+      if (!shown) { box.className = ''; mount(box, emptyState('Your watchlist is empty', 'Save anime to find them here later.', raw('<a class="btn btn-primary" href="/browse">Browse anime</a>'))); }
+      else { box.className = 'card-grid'; box.insertAdjacentHTML('beforeend', r.items.map((x) => animeCard(x, { removable: true })).join('')); }
+      more.hidden = r.done;
+    });
+    await render(true);
+    more.addEventListener('click', () => render(false));
+    delegate(box, 'click', '[data-remove]', async (e, b) => { b.disabled = true; try { await removeFromWatchlist(user.uid, b.dataset.remove); toast('Removed from watchlist.', 'success'); await render(true); } catch { toast('Could not remove it. Please try again.', 'error'); b.disabled = false; } });
   },
   async 'continue-watching'({ root, user }) {
     const body = shell(root, 'Continue watching');
@@ -70,9 +81,19 @@ const PAGES = {
   },
   async history({ root, user }) {
     const body = shell(root, 'Watch history');
-    mount(body, html`<div id="list" class="ep-list"></div><p class="help">Showing your 50 most recent episodes. Progress is saved only for direct video files; embedded players report when an episode was opened.</p>`);
-    const box = $('#list');
-    await load(box, async () => { const p = await listProgress(user.uid, 50); mount(box, p.length ? html`${p.map((x) => html`<a class="list-row" href="${href.watch(x.episodeId)}"><div class="grow"><strong>${x.animeTitle || 'Anime'}</strong><br><span class="muted">Episode ${x.episodeNumber}${x.episodeTitle ? ' — ' + x.episodeTitle : ''}</span></div><span class="badge ${x.completed ? 'badge-ok' : ''}">${x.completed ? 'Watched' : percent(x) + '%'}</span><time class="muted">${formatDateTime(x.updatedAt)}</time></a>`)}` : emptyState('No history yet', 'Watched episodes will be listed here.')); });
+    mount(body, html`<div id="list" class="ep-list"></div><div class="center"><button id="more" class="btn" type="button" hidden>Load more</button></div><p class="help">Progress is saved precisely only for direct video files; embedded players report when an episode was last opened.</p>`);
+    const box = $('#list'), more = $('#more');
+    let cursor = null, shown = 0;
+    const row = (x) => html`<a class="list-row" href="${href.watch(x.episodeId)}"><div class="grow"><strong>${x.animeTitle || 'Anime'}</strong><br><span class="muted">Episode ${x.episodeNumber}${x.episodeTitle ? ' — ' + x.episodeTitle : ''}</span></div><span class="badge ${x.completed ? 'badge-ok' : ''}">${x.completed ? 'Watched' : percent(x) + '%'}</span><time class="muted">${formatDateTime(x.updatedAt)}</time></a>`;
+    const fetchPage = () => load(box, async () => {
+      const r = await listProgressPage(user.uid, { size: 30, cursor });
+      cursor = r.cursor; shown += r.items.length;
+      if (!shown) mount(box, emptyState('No history yet', 'Watched episodes will be listed here.'));
+      else box.insertAdjacentHTML('beforeend', r.items.map((x) => row(x)).join(''));
+      more.hidden = r.done;
+    });
+    await fetchPage();
+    more.addEventListener('click', fetchPage);
   },
   async settings({ root, user }) {
     const body = shell(root, 'Settings');

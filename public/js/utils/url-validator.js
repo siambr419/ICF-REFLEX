@@ -4,11 +4,35 @@ export const PROVIDERS = {
   vimeo: { label: 'Vimeo (embed)', kind: 'embed' },
   dailymotion: { label: 'Dailymotion (embed)', kind: 'embed' },
   gdrive: { label: 'Google Drive preview (embed)', kind: 'embed' },
+  abyss: { label: 'Abyss.to (embed)', kind: 'embed' },
   direct: { label: 'Direct video file (MP4/WebM)', kind: 'direct' },
 };
 export const DIRECT_EXT = ['mp4', 'webm', 'ogv', 'm4v'];
+/**
+ * Abyss.to playback (embed) hosts. The Abyss.to DASHBOARD (dash.abyss.to / abyss.to) is NOT a playback URL and is always rejected.
+ * Publicly documented player URLs use the form  https://abysscdn.com/?v=<VIDEO_ID>  (verified only from third-party sources;
+ * Abyss.to publishes no public embed documentation that could be fetched). If the Embed URL shown in YOUR Abyss dashboard
+ * uses a different host, add it here AND in firebase.json + vercel.json (CSP frame-src) AND firestore.rules (see README).
+ * tests/unit/config-sync.test.mjs fails if these places drift apart.
+ */
+export const ABYSS_EMBED_HOSTS = ['abysscdn.com'];
+export const ABYSS_DASHBOARD_HOSTS = ['abyss.to', 'dash.abyss.to'];
+const ABYSS_ID = /^[A-Za-z0-9_-]{5,40}$/;
 /** Hosts that may ever appear in an iframe src. Keep in sync with firebase.json CSP frame-src. */
-export const EMBED_HOSTS = ['www.youtube-nocookie.com', 'player.vimeo.com', 'www.dailymotion.com', 'drive.google.com'];
+export const EMBED_HOSTS = ['www.youtube-nocookie.com', 'player.vimeo.com', 'www.dailymotion.com', 'drive.google.com', ...ABYSS_EMBED_HOSTS];
+/** Sandbox tokens for every embed iframe. Popups and top-navigation are deliberately NOT granted. */
+export const EMBED_SANDBOX = 'allow-scripts allow-same-origin allow-presentation allow-forms';
+
+/**
+ * Admins may paste either a plain URL or the provider's <iframe …> snippet. Only the src attribute is extracted
+ * (never the HTML) and it is then validated like any other URL.
+ */
+export function extractEmbedSrc(input) {
+  const s = String(input ?? '').trim();
+  if (!/^</.test(s)) return s;
+  const m = s.match(/^<iframe\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+  return m ? (m[1] ?? m[2] ?? '').trim() : '';
+}
 
 export function parseHttpsUrl(input) {
   const s = String(input ?? '').trim();
@@ -30,7 +54,9 @@ export const safeHttps = (input) => { const r = parseHttpsUrl(input); return r.o
 const YT_ID = /^[\w-]{11}$/;
 const bareHost = (u) => u.hostname.toLowerCase().replace(/^www\./, '');
 
-export function resolveEmbed(input) {
+export function resolveEmbed(rawInput) {
+  const input = extractEmbedSrc(rawInput);
+  if (!input && String(rawInput ?? '').trim()) return { ok: false, error: 'Could not find an https src in the pasted HTML. Paste the Embed URL itself.' };
   const r = parseHttpsUrl(input);
   if (!r.ok) return r;
   const u = r.url, host = bareHost(u), parts = u.pathname.split('/').filter(Boolean);
@@ -61,7 +87,13 @@ export function resolveEmbed(input) {
     if (!/^[\w-]{10,}$/.test(id || '')) return bad('Use a Google Drive "file/d/<id>" link.');
     return { ok: true, type: 'embed', provider: 'gdrive', src: `https://drive.google.com/file/d/${id}/preview` };
   }
-  return bad('Unsupported embed provider. Supported: YouTube, Vimeo, Dailymotion, Google Drive.');
+  if (ABYSS_DASHBOARD_HOSTS.includes(u.hostname.toLowerCase())) return bad('This is an Abyss.to dashboard link, not a playback URL. Open the video in the dashboard and copy its Embed URL.');
+  if (ABYSS_EMBED_HOSTS.includes(u.hostname.toLowerCase())) {
+    const id = u.searchParams.get('v') || '';
+    if (u.pathname !== '/' || !ABYSS_ID.test(id)) return bad('Abyss.to embed URLs look like https://abysscdn.com/?v=VIDEO_ID. Copy the Embed URL from your Abyss.to dashboard.');
+    return { ok: true, type: 'embed', provider: 'abyss', src: `https://${u.hostname.toLowerCase()}/?v=${id}` };
+  }
+  return bad('Unsupported embed provider. Supported: YouTube, Vimeo, Dailymotion, Google Drive, Abyss.to.');
 }
 export function resolveDirect(input) {
   const r = parseHttpsUrl(input);

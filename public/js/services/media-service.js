@@ -1,10 +1,11 @@
-import { requireDb, collection, query, where, orderBy, limit, getDocs, snap } from '../firebase/firestore.js';
-import { resolveSource, isAllowedEmbedSrc, safeHttps } from '../utils/url-validator.js';
-import { PROVIDERS } from '../utils/url-validator.js';
+import { requireDb, collection, query, where, orderBy, snap } from '../firebase/firestore.js';
+import { fetchAll } from '../firebase/paging.js';
+import { resolveSource, isAllowedEmbedSrc, safeHttps, EMBED_SANDBOX, PROVIDERS } from '../utils/url-validator.js';
 
 export async function getSources(episodeId) {
-  const s = await getDocs(query(collection(requireDb(), 'episodeSources'), where('episodeId', '==', episodeId), where('isActive', '==', true), orderBy('sortOrder'), limit(20)));
-  return s.docs.map(snap);
+  // Public rule: only active sources of a published episode of a public anime are readable (the rule checks the parent episode).
+  const docs = await fetchAll(query(collection(requireDb(), 'episodeSources'), where('episodeId', '==', episodeId), where('isActive', '==', true), orderBy('sortOrder')), { pageSize: 25 });
+  return docs.map(snap);
 }
 export const pickDefault = (sources) => sources.find((s) => s.isDefault) || sources[0] || null;
 export const sourceLabel = (s) => [s.displayLabel || s.sourceName || PROVIDERS[s.provider]?.label || 'Source', s.qualityLabel, s.language].filter(Boolean).join(' · ');
@@ -25,11 +26,13 @@ export function renderPlayer(container, source, { startAt = 0 } = {}) {
     if (!isAllowedEmbedSrc(r.src)) { message(container, 'This embed host is not allowed.'); return null; }
     const f = document.createElement('iframe');
     f.src = r.src; f.title = 'Video player'; f.allowFullscreen = true;
-    f.allow = 'fullscreen; picture-in-picture; encrypted-media';
+    f.allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media';
     f.referrerPolicy = 'strict-origin-when-cross-origin';
-    f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation');
+    f.setAttribute('sandbox', EMBED_SANDBOX);
+    f.setAttribute('allowfullscreen', '');
+    f.loading = 'eager';
     container.append(f);
-    return { kind: 'embed', el: f };
+    return { kind: 'embed', el: f, src: r.src, provider: r.provider };
   }
   const v = document.createElement('video');
   v.controls = true; v.preload = 'metadata'; v.playsInline = true;

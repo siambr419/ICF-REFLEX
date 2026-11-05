@@ -5,6 +5,7 @@ import { audit } from './audit.js';
 import { openModal } from '../components/modal.js';
 import { auth } from '../firebase/auth.js';
 import { requireDb, collection, query, orderBy, limit, startAfter, getDocs, setDoc, deleteDoc, doc, serverTimestamp, snap } from '../firebase/firestore.js';
+import { fetchAll } from '../firebase/paging.js';
 import { ROLES, ROLE_LABELS } from '../utils/permissions.js';
 import { formatDateTime } from '../utils/formatters.js';
 
@@ -12,7 +13,7 @@ const PAGE = 25;
 function source(db) {
   let roles = null;
   return async (cursor) => {
-    if (!roles) { const r = await getDocs(query(collection(db, 'userRoles'), limit(500))); roles = new Map(r.docs.map((d) => [d.id, d.data().role])); }
+    if (!roles) { const r = await fetchAll(query(collection(db, 'userRoles')), { pageSize: 200 }); roles = new Map(r.map((d) => [d.id, d.data().role])); }
     const c = [orderBy('createdAt', 'desc'), limit(PAGE)]; if (cursor) c.splice(1, 0, startAfter(cursor));
     const s = await getDocs(query(collection(db, 'users'), ...c));
     return { items: s.docs.map((d) => ({ ...snap(d), role: roles.get(d.id) || 'user' })), cursor: s.docs.at(-1) || null, done: s.size < PAGE };

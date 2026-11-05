@@ -1,7 +1,8 @@
 export const SITE = {
   name: 'ICF REFLEX',
   tagline: 'YOUR ANIME. YOUR UNIVERSE.',
-  // Set a real address to enable the mailto link on /contact. Left empty on purpose.
+  // REQUIRED BEFORE LAUNCH: set your real support address (e.g. 'support@your-domain'). Left empty on purpose; no address is invented.
+  // While empty, /contact shows a clearly marked placeholder notice.
   contactEmail: '',
 };
 export const href = {

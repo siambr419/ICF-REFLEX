@@ -2,7 +2,7 @@ import { html, raw, mount, $, delegate } from '../utils/dom.js';
 import * as A from '../services/anime-service.js';
 import * as E from '../services/episode-service.js';
 import { getSources, pickDefault, sourceLabel, renderPlayer } from '../services/media-service.js';
-import { getProgress, saveProgress } from '../services/progress-service.js';
+import { getProgress, saveProgress, touchProgress } from '../services/progress-service.js';
 import { requireDb, addDoc, collection, serverTimestamp } from '../firebase/firestore.js';
 import { authReady } from '../firebase/auth.js';
 import { imgTag } from '../components/media-img.js';
@@ -20,7 +20,10 @@ export default async function watch({ root }) {
     if (!ep || !ep.isPublished) { mount(root, notFoundState('episode')); return; }
     const anime = await A.getAnime(ep.animeId);
     if (!anime) { mount(root, notFoundState('episode')); return; }
-    const [seasons, all, sources, user] = await Promise.all([E.listSeasons(anime.id).catch(() => []), E.listEpisodes(anime.id).catch(() => []), getSources(id).catch(() => []), authReady()]);
+    // No `.catch(() => [])` here: a missing index or a failed read must surface as an error with a retry, not as an empty page.
+    const [seasons, all, sources, authUser] = await Promise.all([E.listSeasons(anime.id), E.listEpisodes(anime.id), getSources(id), authReady()]);
+    // User data (progress, reports) is protected by Firestore rules for verified emails only.
+    const user = authUser?.emailVerified ? authUser : null;
     const ordered = E.sortEpisodes(all, seasons);
     const idx = ordered.findIndex((e) => e.id === id), prev = ordered[idx - 1], next = ordered[idx + 1];
     const sameSeason = ordered.filter((e) => e.seasonId === ep.seasonId);
@@ -29,11 +32,12 @@ export default async function watch({ root }) {
     mount(root, html`<div class="layout-grid">
       <div class="watch-main">
         <div class="player" id="player" aria-live="polite"></div>
+        <p class="player-hint" id="player-hint" hidden></p>
         <div class="source-list" id="sources" role="group" aria-label="Video sources"></div>
         <div class="watch-bar">
           <label class="sr-only" for="speed">Playback speed</label><select id="speed" hidden><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
           <span class="spacer"></span>
-          ${user ? html`<button class="btn btn-sm" id="mark" type="button">Mark as watched</button>` : ''}
+          ${user ? html`<button class="btn btn-sm" id="mark" type="button">Mark as watched</button>` : authUser ? html`<a class="btn btn-sm" href="/verify-email?next=${encodeURIComponent(location.pathname)}">Verify email to save progress</a>` : ''}
           <button class="btn btn-sm" id="report" type="button">Report a problem</button>
         </div>
         <h1>${anime.title} — Episode ${ep.episodeNumber}</h1>
@@ -51,7 +55,8 @@ export default async function watch({ root }) {
 
     const player = $('#player'), list = $('#sources'), speed = $('#speed');
     const prog = user ? await getProgress(user.uid, id).catch(() => null) : null;
-    let current = null, cleanup = () => {};
+    let current = null, cleanup = () => {}, touched = false;
+    const hint = $('#player-hint');
 
     function play(src) {
       cleanup(); cleanup = () => {};
@@ -61,12 +66,20 @@ export default async function watch({ root }) {
       const p = renderPlayer(player, src, { startAt });
       speed.hidden = p?.kind !== 'direct';
       if (p?.kind === 'direct' && user) cleanup = trackProgress(p.el, user, anime, ep);
-      else if (p?.kind === 'embed' && user && !prog) saveProgress(user.uid, { anime, episode: ep, currentTime: 0, duration: ep.durationSeconds || 0 }).catch(() => {});
+      // Embedded players expose no playback time without each provider's own API, so only the "opened" marker is stored for them.
+      hint.hidden = p?.kind !== 'embed';
+      if (p?.kind === 'embed') {
+        hint.replaceChildren('Video not loading? Pick another source above');
+        const a = document.createElement('a'); a.href = p.src; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = 'open this player in a new tab';
+        hint.append(' or ', a, '.');
+      }
+      // Every time an episode is opened, refresh the "last opened" timestamp; position and completed flag are preserved.
+      if (user && p && !touched) { touched = true; touchProgress(user.uid, { anime, episode: ep, existing: prog }).catch((e) => console.warn('history not updated', e.code)); }
     }
     speed.addEventListener('change', () => { const v = player.querySelector('video'); if (v) v.playbackRate = Number(speed.value); });
 
     if (!sources.length) {
-      player.replaceChildren(); const d = document.createElement('div'); d.className = 'player-msg'; d.innerHTML = '<p>No playable source is available for this episode yet.</p>'; player.append(d);
+      player.replaceChildren(); const d = document.createElement('div'); d.className = 'player-msg'; const m = document.createElement('p'); m.textContent = 'No playable source is available for this episode yet.'; d.append(m); player.append(d);
     } else {
       mount(list, html`${sources.map((s) => html`<button class="chip" type="button" data-id="${s.id}" aria-pressed="false">${sourceLabel(s)}</button>`)}`);
       delegate(list, 'click', 'button', (e, b) => play(sources.find((s) => s.id === b.dataset.id)));

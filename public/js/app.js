@@ -16,7 +16,7 @@ const ROUTES = {
   dashboard: 'dashboard', profile: 'dashboard', watchlist: 'dashboard', 'continue-watching': 'dashboard', history: 'dashboard', settings: 'dashboard',
   admin: ['admin/overview', 'default'], 'admin-anime': ['admin/anime-manager', 'default'],
   'admin-seasons': ['admin/episode-manager', 'seasons'], 'admin-episodes': ['admin/episode-manager', 'episodes'],
-  'admin-video': ['admin/source-manager', 'default'], 'admin-genres': ['admin/simple-managers', 'genres'],
+  'admin-video': ['admin/source-manager', 'default'], 'admin-posters': ['admin/poster-manager', 'default'], 'admin-genres': ['admin/simple-managers', 'genres'],
   'admin-featured': ['admin/simple-managers', 'featured'], 'admin-users': ['admin/user-manager', 'users'],
   'admin-roles': ['admin/user-manager', 'roles'], 'admin-reports': ['admin/report-manager', 'default'],
   'admin-settings': ['admin/overview', 'settings'],
@@ -60,7 +60,7 @@ async function boot() {
     await mod[name](ctx);
   } catch (e) {
     console.error(e);
-    mount(root, errorState(explainError(e)));
+    mount(root, errorState(e));
     $('[data-retry]', root)?.addEventListener('click', () => location.reload());
   }
 }

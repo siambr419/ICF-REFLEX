@@ -3,7 +3,7 @@ import { GUARDS } from '../utils/permissions.js';
 
 const NAV = [
   ['/admin', 'Overview', 'staff'], ['/admin/anime', 'Anime', 'content'], ['/admin/seasons', 'Seasons', 'content'], ['/admin/episodes', 'Episodes', 'content'],
-  ['/admin/video', 'Video sources', 'content'], ['/admin/genres', 'Genres', 'content'], ['/admin/featured', 'Featured', 'content'],
+  ['/admin/video', 'Video sources', 'content'], ['/admin/posters', 'Poster Manager', 'content'], ['/admin/genres', 'Genres', 'content'], ['/admin/featured', 'Featured', 'content'],
   ['/admin/users', 'Users', 'admin'], ['/admin/roles', 'Roles', 'super'], ['/admin/reviews', 'Reviews', 'mod'], ['/admin/reports', 'Reports', 'mod'], ['/admin/settings', 'Settings', 'staff'],
 ];
 /** Renders the admin layout and returns the main content element. Hiding links is UX only; Firestore rules enforce access. */

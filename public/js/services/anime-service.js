@@ -1,4 +1,5 @@
 import { requireDb, collection, query, where, orderBy, limit, startAfter, getDocs, getDoc, doc, snap } from '../firebase/firestore.js';
+import { fetchAll } from '../firebase/paging.js';
 import { serverToken, matchesQuery } from '../utils/search.js';
 
 export const PAGE_SIZE = 24;
@@ -25,26 +26,28 @@ export async function getAnime(id) {
 }
 export async function getGenres() {
   if (genresCache) return genresCache;
-  const s = await getDocs(query(collection(requireDb(), 'genres'), orderBy('name'), limit(100)));
-  return (genresCache = s.docs.map(snap));
+  const docs = await fetchAll(query(collection(requireDb(), 'genres'), orderBy('name')), { pageSize: 100 });
+  return (genresCache = docs.map(snap));
 }
 /**
  * Catalog query. Firestore cannot combine every filter with every sort without a composite index per combination,
  * so ONE filter (genre > year > status > type) runs on the server and the others are applied to each fetched page.
- * Text search uses searchTokens (array-contains) and has no server-side ordering; all filters then run client-side.
+ * Text search uses ONE searchTokens array-contains on the server (still ordered by the chosen sort); remaining words and all filters run client-side.
  */
 export async function listAnime({ sort = 'recent', filters = {}, q = '', cursor = null, size = PAGE_SIZE } = {}) {
   const c = [where('visibility', '==', 'public')];
   const server = new Set();
   const token = serverToken(q);
+  const s = SORTS[sort] || SORTS.recent;
   if (token) {
+    // Search keeps the selected sort: the server orders the token matches (composite indexes searchTokens+visibility+sort field).
     c.push(where('searchTokens', 'array-contains', token));
+    c.push(orderBy(s.field, s.dir));
   } else {
     if (filters.genre) { c.push(where('genres', 'array-contains', filters.genre)); server.add('genre'); }
     else if (filters.year) { c.push(where('releaseYear', '==', Number(filters.year))); server.add('year'); }
     else if (filters.status) { c.push(where('status', '==', filters.status)); server.add('status'); }
     else if (filters.type) { c.push(where('animeType', '==', filters.type)); server.add('type'); }
-    const s = SORTS[sort] || SORTS.recent;
     c.push(orderBy(s.field, s.dir));
   }
   if (cursor) c.push(startAfter(cursor));

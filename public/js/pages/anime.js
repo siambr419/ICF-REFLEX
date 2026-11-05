@@ -19,12 +19,14 @@ export default async function animePage({ root }) {
     document.title = `${a.title} — ICF REFLEX`;
     document.querySelector('meta[name=description]')?.setAttribute('content', (a.description || '').slice(0, 160));
     const [seasons, episodes, genres, related, user] = await Promise.all([
-      E.listSeasons(id).catch(() => []), E.listEpisodes(id).catch(() => []), A.getGenres().catch(() => []), A.getRelated(a).catch(() => []), authReady(),
+      E.listSeasons(id), E.listEpisodes(id), // errors (e.g. a missing index) surface with a retry instead of an empty list
+      A.getGenres().catch((e) => { console.warn('genres unavailable', e.code); return []; }), A.getRelated(a).catch((e) => { console.warn('related unavailable', e.code); return []; }), authReady(),
     ]);
     const ordered = E.sortEpisodes(episodes, seasons);
     const first = ordered[0];
     const gname = (s) => genres.find((g) => (g.slug || g.id) === s)?.name || s;
-    let saved = user ? await inWatchlist(user.uid, id).catch(() => false) : false;
+    const verified = !!user?.emailVerified;
+    let saved = verified ? await inWatchlist(user.uid, id).catch(() => false) : false;
 
     mount(root, html`<div class="detail-hero">${imgTag(a.bannerUrl || a.coverUrl, '', 'banner', 1280, 360)}</div>
       <div class="layout-grid">
@@ -38,7 +40,7 @@ export default async function animePage({ root }) {
           <p>${a.description}</p>
           <div class="hero-actions">
             ${first ? html`<a class="btn btn-primary btn-lg" href="${href.watch(first.id)}">Watch episode ${first.episodeNumber}</a>` : html`<span class="btn btn-lg" aria-disabled="true">No episodes yet</span>`}
-            ${user ? html`<button class="btn btn-lg" id="wl" type="button" aria-pressed="${String(saved)}">${saved ? 'In watchlist ✓' : 'Add to watchlist'}</button>` : html`<a class="btn btn-lg" href="/login?next=${encodeURIComponent(location.pathname)}">Log in to save</a>`}
+            ${verified ? html`<button class="btn btn-lg" id="wl" type="button" aria-pressed="${String(saved)}">${saved ? 'In watchlist ✓' : 'Add to watchlist'}</button>` : user ? html`<a class="btn btn-lg" href="/verify-email?next=${encodeURIComponent(location.pathname)}">Verify email to save</a>` : html`<a class="btn btn-lg" href="/login?next=${encodeURIComponent(location.pathname)}">Log in to save</a>`}
           </div>
         </div>
       </div>

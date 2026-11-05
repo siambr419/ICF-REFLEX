@@ -1,8 +1,11 @@
 import { html, mount } from '../utils/dom.js';
+import { toast } from '../components/toast.js';
+import { confirmModal } from '../components/modal.js';
 import { adminShell, badge } from './shell.js';
 import { mountCrud } from './crud.js';
 import { audit } from './audit.js';
-import { deleteAnimeCascade } from './cascade.js';
+import { deleteAnimeCascade, cleanupUserReferences } from './cascade.js';
+import { syncAnimeVisibility, repairAllVisibility } from './visibility-sync.js';
 import { getGenres } from '../services/anime-service.js';
 import { requireDb, collection, query, orderBy, limit, startAfter, getDocs, getDoc, setDoc, updateDoc, doc, serverTimestamp, snap } from '../firebase/firestore.js';
 import { ENUMS } from '../site.js';
@@ -16,7 +19,27 @@ export default async function animePage(ctx) {
   const PAGE = 25;
   mountCrud(main, {
     title: 'Anime', singular: 'anime', searchable: true, emptyText: 'Create your first anime with the button above.',
-    intro: 'Images are external HTTPS URLs; nothing is uploaded to Firebase. Visibility "hidden" keeps an anime out of the public site.',
+    intro: 'Images are external HTTPS URLs; nothing is uploaded to Firebase (use Poster Manager to organise and apply images). Visibility "hidden" keeps the anime AND its seasons, episodes and sources out of the public site. Changing visibility re-syncs the visibility flag of all its seasons and episodes.',
+    toolbar: [
+      {
+        label: 'Repair visibility flags',
+        async run({ reload }) {
+          if (!(await confirmModal('Re-sync the visibility flag of every season and episode of every anime. Run this once after upgrading from an older version (older seasons/episodes stay hidden from visitors until this has run). It only changes documents whose flag is wrong.', { confirmLabel: 'Run repair' }))) return;
+          toast('Repair started…', 'info');
+          const t = await repairAllVisibility();
+          toast(`Checked ${t.anime} anime. Updated ${t.seasons} seasons and ${t.episodes} episodes.`, 'success', 8000); await reload();
+        },
+      },
+      {
+        label: 'Clean orphan references',
+        async run() {
+          const slug = (prompt('Slug of a DELETED anime whose watch history / watchlist entries should be cleaned up:') || '').trim();
+          if (!slug) return;
+          const r = await cleanupUserReferences(slug);
+          toast(`Removed ${r.progress} progress entries and ${r.watchlists} watchlist entries (only possible when the anime no longer exists).`, 'success', 8000);
+        },
+      },
+    ],
     columns: [{ label: 'Title', value: (a) => a.title }, { label: 'Year', value: (a) => a.releaseYear }, { label: 'Type', value: (a) => a.animeType }, { label: 'Status', value: (a) => cap(a.status) }, { label: 'Public', value: (a) => badge(a.visibility === 'public', 'Public', 'Hidden') }],
     fields: (existing) => [
       { name: 'title', label: 'Title', type: 'text', required: true, max: 200 },
@@ -50,8 +73,16 @@ export default async function animePage(ctx) {
       if (existing) await updateDoc(ref, data);
       else { if ((await getDoc(ref)).exists()) throw Object.assign(new Error('An anime with this slug already exists.'), { userMessage: 'An anime with this slug already exists. Change the slug.' }); await setDoc(ref, { ...data, createdAt: serverTimestamp() }); }
       audit(existing ? 'update' : 'create', 'anime', slug);
+      if (existing && existing.visibility !== v.visibility) {
+        try { const r = await syncAnimeVisibility(slug, v.visibility === 'public'); if (r.seasons || r.episodes) toast(`Visibility synced to ${r.seasons} seasons and ${r.episodes} episodes.`, 'success'); }
+        catch (e) { console.error(e); throw Object.assign(e, { userMessage: 'The anime was saved, but its seasons/episodes could not be re-synced. Use "Repair visibility flags" before relying on the new visibility.' }); }
+      }
     },
-    deleteMessage: (a) => `Delete "${a.title}" together with its seasons, episodes, video sources and featured entries? This cannot be undone.`,
-    async remove(a) { await deleteAnimeCascade(a.id); audit('delete', 'anime', a.id); },
+    deleteMessage: (a) => `Delete "${a.title}" together with its seasons, episodes, video sources, featured entries, poster records and users' watch history / watchlist entries for it? This cannot be undone.`,
+    async remove(a) {
+      const r = await deleteAnimeCascade(a.id); audit('delete', 'anime', a.id);
+      toast(`Deleted "${a.title}": ${r.episodes} episodes, ${r.seasons} seasons, ${r.progress} progress and ${r.watchlists} watchlist entries.`, 'success', 8000);
+      if (r.cleanupError) throw Object.assign(new Error(r.cleanupError), { userMessage: r.cleanupError });
+    },
   });
 }
