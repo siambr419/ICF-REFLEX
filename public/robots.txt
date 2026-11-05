@@ -1,6 +1,0 @@
-User-agent: *
-Disallow: /admin/
-Disallow: /dashboard/
-Disallow: /login
-Disallow: /register
-# Add your sitemap after running: node scripts/generate-sitemap.mjs https://YOUR-DOMAIN
